@@ -1,4 +1,3 @@
-from __future__ import absolute_import, unicode_literals
 from celery import shared_task
 from django.conf import settings
 from django.core.mail import send_mail
@@ -6,7 +5,7 @@ from django.core.mail import send_mail
 @shared_task
 def send_active_email(token, username, email):
     '''发送激活邮件'''
-    subject = '天天生鲜用户激活' # 标题
+    subject = '尚硅谷书城用户激活' # 标题
     message = ''
     sender = settings.EMAIL_FROM # 发件人
     receiver = [email] # 收件人列表

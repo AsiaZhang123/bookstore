@@ -14,12 +14,16 @@
 - [12，用户激活功能实现](#12)
 - [13，用户中心最近浏览功能](#13)
 - [14，过滤器功能实现](#14)
-- [15，部署](#15)
-- [16，使用nginx+gunicorn+django进行部署](#16)
+- [15，使用nginx+gunicorn+django进行部署](#15)
+- [16，django日志模块的使用](#16)
+- [17，中间件的编写](#17)
 
 # <a id="1">1，新建项目</a>
 
 ## 1，新建项目
+
+新建项目之前需要先看`2.`，把包都安装了！
+
 ```
 $ django-admin startproject bookstore
 ```
@@ -34,33 +38,46 @@ $ vim requirements.txt
 安装包文件如下:
 
 ```python
-# requirements.txt
 amqp==2.2.2
+asn1crypto==0.24.0
 billiard==3.5.0.3
 celery==4.1.0
-Django==1.8.2
-django-haystack==2.6.1
+certifi==2018.10.15
+cffi==1.11.5
+chardet==3.0.4
+cryptography==2.3.1
+Django==1.11.15
+django-cors-headers==2.4.0
 django-redis==4.8.0
 django-tinymce==2.6.0
+djangorestframework==3.7.7
+djangorestframework-jwt==1.11.0
+gunicorn==19.9.0
+idna==2.7
 itsdangerous==0.24
 jieba==0.39
 kombu==4.1.0
 olefile==0.44
 Pillow==4.3.0
-pycryptodome==3.4.7
-PyMySQL==0.7.11
-python-alipay-sdk==1.4.0
+pycparser==2.19
+pycryptodome==3.6.6
+pycryptodomex==3.6.6
+PyJWT==1.6.4
+PyMySQL==0.9.2
+python-alipay-sdk==1.7.0
 pytz==2017.2
 redis==2.10.6
-uWSGI==2.0.15
+six==1.11.0
+urllib3==1.23
 vine==1.1.4
 Whoosh==2.7.4
+django-haystack==2.8.1
 ```
 
 安装环境（在虚拟环境中）
 
 ```
-$ pip install -r requirements.txt
+$ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/
 ```
 
 ## 3，修改项目配置文件，将默认sqlite改为mysql
@@ -77,6 +94,13 @@ DATABASES = {
         'PORT': 3306,
     }
 }
+```
+
+为了使用mysql的驱动，在主app的`__init__.py`文件中加入以下两行代码：
+
+```py
+import pymysql
+pymysql.install_as_MySQLdb()
 ```
 
 # <a id="2">2，用户系统开发</a>
@@ -116,12 +140,14 @@ class BaseModel(models.Model):
         abstract = True
 ```
 
-然后我们针对Users设计一张表出来。
+然后我们针对Users设计一张表出来。以下代码写入`users/models.py`文件中。
 
 ```python
+from db.base_model import BaseModel
+
 class Passport(BaseModel):
     '''用户模型类'''
-    username = models.CharField(max_length=20, unique=True, verbose_name='用户名称')
+    username = models.CharField(max_length=20, unique=True, verbose_name='用户名称')
     password = models.CharField(max_length=40, verbose_name='用户密码')
     email = models.EmailField(verbose_name='用户邮箱')
     is_active = models.BooleanField(default=False, verbose_name='激活状态')
@@ -133,9 +159,11 @@ class Passport(BaseModel):
         db_table = 's_user_account'
 ```
 
-接下来我们在PassportManager()中实现添加和查找账户信息的功能，这样抽象性更好。
+接下来我们在PassportManager()中实现添加和查找账户信息的功能，这样抽象性更好。下面这个类需要写在`Passport`的上面。
 
 ```python
+from utils.get_hash import get_hash
+
 # Create your models here.
 class PassportManager(models.Manager):
     def add_one_passport(self, username, password, email):
@@ -170,7 +198,7 @@ def get_hash(str):
 接下来我们将Users的表映射到数据库中去。
 
 ```
-mysql> create database bookstore;
+mysql> create database bookstore charset=utf8;
 $ python manage.py makemigrations users
 $ python manage.py migrate
 ```
@@ -190,14 +218,14 @@ $ mkdir templates
 $ python manage.py runserver 9000
 ```
 然后呢？我们想把register.html渲染出来。我们先来看views.py这个视图文件。
-```
+```py
 # users/views.py
 def register(request):
     '''显示用户注册页面'''
     return render(request, 'users/register.html')
 ```
 然后我们将url映射做好。主应用的urls.py为
-```
+```py
 # bookstore/urls.py
 urlpatterns = [
     url(r'^admin/', include(admin.site.urls)),
@@ -245,6 +273,9 @@ STATICFILES_DIRS = [
 3，写入数据库。
 4，返回注册页（因为还没做首页）。
 ```python
+from users.models import Passport
+import re
+from django.shortcuts import render, redirect, reverse
 # users/views.py
 def register_handle(request):
     '''进行用户注册处理'''
@@ -256,16 +287,20 @@ def register_handle(request):
     # 进行数据校验
     if not all([username, password, email]):
         # 有数据为空
-        return render(request, 'users/register.html', {'errmsg':'参数不能为空!'})
+        return render(request, 'users/register.html', {'errmsg': '参数不能为空!'})
 
     # 判断邮箱是否合法
     if not re.match(r'^[a-z0-9][\w\.\-]*@[a-z0-9\-]+(\.[a-z]{2,5}){1,2}$', email):
         # 邮箱不合法
-        return render(request, 'users/register.html', {'errmsg':'邮箱不合法!'})
+        return render(request, 'users/register.html', {'errmsg': '邮箱不合法!'})
 
     # 进行业务处理:注册，向账户系统中添加账户
     # Passport.objects.create(username=username, password=password, email=email)
-    passport = Passport.objects.add_one_passport(username=username, password=password, email=email)
+    try:
+        Passport.objects.add_one_passport(username=username, password=password, email=email)
+    except Exception as e:
+        print("e: ", e) # 把异常打印出来
+        return render(request, 'users/register.html', {'errmsg': '用户名已存在！'})
 
     # 注册完，还是返回注册页。
     return redirect(reverse('user:register'))
@@ -385,8 +420,14 @@ class Books(BaseModel):
 
     objects = BooksManager()
 
+    # admin显示书籍的名字
+    def __str__(self):
+        return self.name
+
     class Meta:
         db_table = 's_books'
+        verbose_name = '书籍'
+        verbose_name_plural = '书籍'
 ```
 
 同样，我们这里再写一下BooksManager()，有一些基本功能在这里抽象出来。
@@ -468,10 +509,10 @@ from django.core.paginator import Paginator
 def index(request):
     '''显示首页'''
     # 查询每个种类的3个新品信息和4个销量最好的商品信息
-    python_new = Books.objects.get_books_by_type(PYTHON, 3, sort='new')
-    python_hot = Books.objects.get_books_by_type(PYTHON, 4, sort='hot')
-    javascript_new = Books.objects.get_books_by_type(JAVASCRIPT, 3, sort='new')
-    javascript_hot = Books.objects.get_books_by_type(JAVASCRIPT, 4, sort='hot')
+    python_new = Books.objects.get_books_by_type(PYTHON, limit=3, sort='new')
+    python_hot = Books.objects.get_books_by_type(PYTHON, limit=4, sort='hot')
+    javascript_new = Books.objects.get_books_by_type(JAVASCRIPT,limit= 3, sort='new')
+    javascript_hot = Books.objects.get_books_by_type(JAVASCRIPT, limit=4, sort='hot')
     algorithms_new = Books.objects.get_books_by_type(ALGORITHMS, 3, sort='new')
     algorithms_hot = Books.objects.get_books_by_type(ALGORITHMS, 4, sort='hot')
     machinelearning_new = Books.objects.get_books_by_type(MACHINELEARNING, 3, sort='new')
@@ -531,6 +572,46 @@ $ python manage.py createsuperuser
     <a href="#">{{ book.name }}</a>
 {% endfor %}
 ```
+用来替换掉`index.html`中的：
+```html
+<a href="#">Python核心编程</a>
+<a href="#">笨办法学Python</a>
+<a href="#">Python学习手册</a>
+```
+
+用代码：
+```html
+{% for book in python_hot %}
+    <li>
+        <h4><a href="#">{{ book.name }}</a></h4>
+        <a href="#"><img src="{% static book.image %}"></a>
+        <div class="prize">¥ {{ book.price }}</div>
+    </li>
+{% endfor %}
+```
+替换掉`index.html`中的：
+```html
+<li>
+    <h4><a href="#">Python核心编程</a></h4>
+    <a href="#"><img src="images/book/book001.jpg"></a>
+    <div class="prize">¥ 30.00</div>
+</li>
+<li>
+    <h4><a href="#">Python学习手册</a></h4>
+    <a href="#"><img src="images/book/book002.jpg"></a>
+    <div class="prize">¥ 5.50</div>
+</li>
+<li>
+    <h4><a href="#">Python Cookbook</a></h4>
+    <a href="#"><img src="images/book/book003.jpg"></a>
+    <div class="prize">¥ 3.90</div>
+</li>
+<li>
+    <h4><a href="#">Python高性能编程</a></h4>
+    <a href="#"><img src="images/book/book004.jpg"></a>
+    <div class="prize">¥ 25.80</div>
+</li>
+```
 
 由于我们在编辑商品信息时，需要上传书籍的图片，所以在配置文件中设置图片存放目录。
 
@@ -568,9 +649,12 @@ return redirect(reverse('books:index'))
 ```python
 def login(request):
     '''显示登录页面'''
-    username = ''
-    checked = ''
-
+    if request.COOKIES.get("username"):
+        username = request.COOKIES.get("username")
+        checked = 'checked'
+    else:
+        username = ''
+        checked = ''
     context = {
         'username': username,
         'checked': checked,
@@ -609,13 +693,7 @@ def login_check(request):
     passport = Passport.objects.get_one_passport(username=username, password=password)
 
     if passport:
-        # 用户名密码正确
-        # 获取session中的url_path
-        # if request.session.has_key('url_path'):
-        #     next_url = request.session.get('url_path')
-        # else:
-        #     next_url = reverse('books:index')
-        next_url = request.session.get('url_path', reverse('books:index')) # /user/
+        next_url = reverse('books:index') # /user/
         jres = JsonResponse({'res': 1, 'next_url': next_url})
 
         # 判断是否需要记住用户名
@@ -663,24 +741,27 @@ def login_check(request):
     <script>
         $(function () {
             $('#btnLogin').click(function () {
-                // 获取用户名和密码
-                username = $('#username').val()
-                password = $('#pwd').val()
-                csrf = $('input[name="csrfmiddlewaretoken"]').val()
-                remember = $('input[name="remember"]').prop('checked')
-                // 发起ajax请求
-                params = {'username':username, 'password':password,
-                        'csrfmiddlewaretoken':csrf, 'remember':remember}
+                var username = $("#username").val()
+                var password = $("#pwd").val()
+                var remember = $('input[name="remember"]').prop('checked')
+                var csrfmiddlewaretoken = $('input[name="csrfmiddlewaretoken"]').val()
+
+                var params = {
+                    username: username,
+                    password: password,
+                    remember: remember,
+                    csrfmiddlewaretoken: csrfmiddlewaretoken
+                }
                 $.post('/user/login_check/', params, function (data) {
                     // 用户名密码错误 {'res': 0}
                     // 登录成功 {'res': 1}
-                    if (data.res == 0){
-                        $('#username').next().html('用户名或密码错误').show()
-                    }
-                    else
-                    {
+                    if (data.res == 1) {
                         // 跳转页面
-                        location.href = data.next_url // /user/
+                        location.href = data.next_url;
+                    } else if (data.res == 2) {
+                        alert("数据不完整");
+                    } else if (data.res == 0) {
+                        alert("用户名或者密码错误");
                     }
                 })
             })
@@ -753,9 +834,12 @@ def detail(request, books_id):
 
     # 新品推荐
     books_li = Books.objects.get_books_by_type(type_id=books.type_id, limit=2, sort='new')
-
+    
+    # 当前商品类型
+    type_title = BOOKS_TYPE[books.type_id]
+    
     # 定义上下文
-    context = {'books': books, 'books_li': books_li}
+    context = {'books': books, 'books_li': books_li, 'type_title':type_title}
 
     # 使用模板
     return render(request, 'books/detail.html', context)
@@ -771,6 +855,11 @@ url(r'books/(?P<books_id>\d+)/$', views.detail, name='detail'), # 详情页
 然后将detail.html页面改写成django可以渲染的模板。
 
 ```html
+#动态添加详情页商品的标签(全部商品下的)
+{{type_title}}
+```
+
+```html
 <h3>{{ books.name }}</h3>
 <p>{{ books.desc }}</p>
 <div class="price_bar">
@@ -782,8 +871,8 @@ url(r'books/(?P<books_id>\d+)/$', views.detail, name='detail'), # 详情页
 ```html
 {% for book in books_li %}
 <li>
-    <a href="{% url 'books:detail' books_id=books.id %}"><img src="{% static book.image %}"></a>
-    <h4><a href="{% url 'books:detail' books_id=books.id %}">{{ book.name }}</a></h4>
+    <a href="{% url 'books:detail' books_id=book.id %}"><img src="{% static book.image %}"></a>
+    <h4><a href="{% url 'books:detail' books_id=book.id %}">{{ book.name }}</a></h4>
     <div class="price">￥{{ book.price }}</div>
 </li>
 {% endfor %}
@@ -796,7 +885,7 @@ url(r'books/(?P<books_id>\d+)/$', views.detail, name='detail'), # 详情页
 然后将登陆后的用户名等显示出来。那商品详情页就开发的差不多了。
 
 ## 8，抽象出一个通用的模板，供别的模板继承。
-```
+```html
 {# 首页 登录 注册 的父模板 #}
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en">
@@ -885,7 +974,7 @@ url(r'books/(?P<books_id>\d+)/$', views.detail, name='detail'), # 详情页
 ```
 然后在别的模板中继承base.html，这就是抽象的好处。现在的组件化思路也是这样的，松耦合，紧内聚，复用的思路。
 比如改写register.html
-```
+```html
 {% extends 'base.html' %}
 {% load staticfiles %}
 {% block title %}尚硅谷书城-注册{% endblock title %}
@@ -949,7 +1038,7 @@ url(r'books/(?P<books_id>\d+)/$', views.detail, name='detail'), # 详情页
 {% endblock body %}
 ```
 然后改写login.html
-```
+```html
 {% extends 'base.html' %}
 {% load staticfiles %}
 {% block title %}尚硅谷书城-登录{% endblock title %}
@@ -958,13 +1047,17 @@ url(r'books/(?P<books_id>\d+)/$', views.detail, name='detail'), # 详情页
     $(function () {
         $('#btnLogin').click(function () {
             // 获取用户名和密码
-            username = $('#username').val()
-            password = $('#pwd').val()
-            csrf = $('input[name="csrfmiddlewaretoken"]').val()
-            remember = $('input[name="remember"]').prop('checked')
+            var username = $('#username').val()
+            var password = $('#pwd').val()
+            var csrf = $('input[name="csrfmiddlewaretoken"]').val()
+            var remember = $('input[name="remember"]').prop('checked')
             // 发起ajax请求
-            params = {'username':username, 'password':password,
-                    'csrfmiddlewaretoken':csrf, 'remember':remember}
+            var params = {
+                'username': username,
+                'password': password,
+                'csrfmiddlewaretoken': csrf,
+                'remember': remember
+            }
             $.post('/user/login_check/', params, function (data) {
                 // 用户名密码错误 {'res':0}
                 // 登录成功 {'res':1}
@@ -984,7 +1077,6 @@ url(r'books/(?P<books_id>\d+)/$', views.detail, name='detail'), # 详情页
 {% block header_con %}{% endblock header_con %}
 {% block search_bar %}{% endblock search_bar %}
 {% block body %}
-<body>
     <div class="login_top clearfix">
         <a href="index.html" class="login_logo"><img src="{% static 'images/logo.png' %}" style="width: 160px; height: 53px;"></a>
     </div>
@@ -1017,7 +1109,7 @@ url(r'books/(?P<books_id>\d+)/$', views.detail, name='detail'), # 详情页
 {% endblock body %}
 ```
 改写index.html
-```
+```html
 {% extends 'base.html' %}
 {% load staticfiles %}
 {% block title %}尚硅谷书店-首页{% endblock title %}
@@ -1223,7 +1315,7 @@ url(r'books/(?P<books_id>\d+)/$', views.detail, name='detail'), # 详情页
 {% endblock body %}
 ```
 改写detail.html
-```
+```html
 {% extends 'base.html' %}
 {% load staticfiles %}
 {% block title %}尚硅谷书店-首页{% endblock title %}
@@ -1319,37 +1411,17 @@ url(r'books/(?P<books_id>\d+)/$', views.detail, name='detail'), # 详情页
     </div>
     <div class="add_jump"></div>
 {% endblock body %}
-{% block bottomfiles %}
-<script type="text/javascript">
-    var $add_x = $('#add_cart').offset().top;
-    var $add_y = $('#add_cart').offset().left;
-
-    var $to_x = $('#show_count').offset().top;
-    var $to_y = $('#show_count').offset().left;
-
-    $(".add_jump").css({'left':$add_y+80,'top':$add_x+10,'display':'block'})
-    $('#add_cart').click(function(){
-        $(".add_jump").stop().animate({
-            'left': $to_y+7,
-            'top': $to_x+7},
-            "fast", function() {
-                $(".add_jump").fadeOut('fast',function(){
-                    $('#show_count').html(2);
-                });
-
-        });
-    })
-</script>
-{% endblock bottomfiles %}
 ```
 这里要注意的是override也就是复写的问题，其实是面向对象的思想。
 
 ## 9，列表页的开发
 
 接下来我们来实现列表页。通过观察list.html我们可以发现，这里有分页的功能，以及按照不同特征来进行排序，比如价格，比如人气这样的特征。这里要注意分页功能的实现，以及为什么要分页，一下读取所有数据，数据库的压力很大。
-```
+```py
 # 商品种类 页码 排序方式
 # /list/(种类id)/(页码)/?sort=排序方式
+from django.core.paginator import Paginator
+
 def list(request, type_id, page):
     '''商品列表页面'''
     # 获取排序方式
@@ -1409,14 +1481,14 @@ def list(request, type_id, page):
     return render(request, 'books/list.html', context)
 ```
 然后配置urls.py
-```
+```py
 # books/urls.py
 url(r'^list/(?P<type_id>\d+)/(?P<page>\d+)/$', views.list, name='list'), # 列表页
 ```
 将list.html拷贝到templates/books
 先继承base.html。
 将index.html首页里面的查看更多，修改url定向。
-```
+```py
 {% url 'books:list' type_id=1 page=1 %}
 ```
 修改名称。
@@ -1424,7 +1496,7 @@ url(r'^list/(?P<type_id>\d+)/(?P<page>\d+)/$', views.list, name='list'), # 列�
 {{ type_title }}
 ```
 新品推荐。
-```
+```html
 {% for book in books_new %}
 <li>
     <a href="{% url 'books:detail' books_id=book.id %}"><img src="{% static book.image %}"></a>
@@ -1434,13 +1506,13 @@ url(r'^list/(?P<type_id>\d+)/(?P<page>\d+)/$', views.list, name='list'), # 列�
 {% endfor %}
 ```
 按不同的特征排序。
-```
+```html
 <a href="/list/{{ type_id }}/1/" {% if sort == 'default' %}class="active"{% endif %}>默认</a>
 <a href="/list/{{ type_id }}/1/?sort=price" {% if sort == 'price' %}class="active"{% endif %}>价格</a>
 <a href="/list/{{ type_id }}/1/?sort=hot" {% if sort == 'hot' %}class="active"{% endif %}>人气</a>
 ```
 商品列表
-```
+```html
 {% for books in books_li %}
     <li>
         <a href="{% url 'books:detail' books_id=books.id %}"><img src="{% static books.image %}"></a>
@@ -1454,7 +1526,7 @@ url(r'^list/(?P<type_id>\d+)/(?P<page>\d+)/$', views.list, name='list'), # 列�
 {% endfor %}
 ```
 前端分页功能的实现。
-```
+```html
 {% if books_li.has_previous %}
     <a href="/list/{{ type_id }}/{{ books_li.previous_page_number }}/?sort={{ sort }}"><上一页</a>
 {% endif %}
@@ -1473,7 +1545,9 @@ url(r'^list/(?P<type_id>\d+)/(?P<page>\d+)/$', views.list, name='list'), # 列�
 # <a id="4">4，用户中心的实现</a>
 接下来我们来实现用户中心的功能，先不实现最近浏览这个功能。首先来看一下这个前端页面，那我们知道我们还得给User这个model添加地址表。
 那我们先来建model
-```
+```py
+# user/models.py
+
 class Address(BaseModel):
     '''地址模型类'''
     recipient_name = models.CharField(max_length=20, verbose_name='收件人')
@@ -1528,7 +1602,7 @@ $ python manage.py makemigrations users
 $ python manage.py migrate
 ```
 然后编写视图函数views.py
-```
+```py
 def user(request):
     '''用户中心-信息页'''
     passport_id = request.session.get('passport_id')
@@ -1551,7 +1625,7 @@ url(r'^$', views.user, name='user'), # 用户中心-信息页
 ```
 然后将user_center_info.html拷贝到templates/users文件夹下。
 还是继承base.html，然后对模板进行渲染。
-```
+```html
 <li><span>用户名：</span>{{ request.session.username }}</li>
 {% if addr %}
     <li><span>联系方式：</span>{{ addr.recipient_phone }}</li>
@@ -1564,10 +1638,9 @@ url(r'^$', views.user, name='user'), # 用户中心-信息页
 我们这里思考一下，用户中心必须登录以后才可以使用，我们应该怎么实现这个功能呢？
 在这里，python的装饰器功能就派上用场了。
 新建一个utils文件夹，用来存放自己编写的一些常用功能函数。
-```
+```py
 # utils/decorators.py
 from django.shortcuts import redirect
-from django.http import HttpResponse
 from django.core.urlresolvers import reverse
 
 
@@ -1592,8 +1665,13 @@ def login_required(view_func):
 ## 1，创建models
 这里我们要引进redis的使用。大家可以参考《redis实战》这本书，有很多redis的妙用，网上有电子版。
 我们使用redis实现购物车的功能。因为购物车里的数据相对不是那么重要，而且更新频繁。当然如果要是考虑到安全性，还是要持久化到数据库中比较好。redis在内存中不是很安全，比如之前redis就被攻击过。
-我们现在配置文件中配置缓存有关的东西。
+使用shell命令
 ```
+ps -ef | grep redis
+```
+来检查redis server是否启动。
+我们现在配置文件中配置缓存有关的东西。
+```py
 # settings.py
 # pip install django-redis
 CACHES = {
@@ -1615,7 +1693,7 @@ SESSION_CACHE_ALIAS = "default"
 $ python manage.py startapp cart
 ```
 然后开始编写视图函数。先来编写向购物车中添加商品的功能。
-```
+```py
 # cart/views.py
 from django.shortcuts import render
 from django.http import JsonResponse
@@ -1627,11 +1705,10 @@ from django_redis import get_redis_connection
 
 # 前端发过来的数据：商品id 商品数目 books_id books_count
 # 涉及到数据的修改，使用post方式
+
+@login_required
 def cart_add(request):
     '''向购物车中添加数据'''
-    # 判断用户是否登录
-    if not request.session.has_key('islogin'):
-        return JsonResponse({'res':0, 'errmsg':'请先登录'})
 
     # 接收数据
     books_id = request.POST.get('books_id')
@@ -1679,13 +1756,12 @@ def cart_add(request):
 
 ## 2，渲染购物车页面
 在登陆以后，我们应该能够看到购物车里的商品数量，现在我们就来实现这个功能。
-```
+```py
 # cart/views.py
+
+@login_required
 def cart_count(request):
     '''获取用户购物车中商品的数目'''
-    # 判断用户是否登录
-    if not request.session.has_key('islogin'):
-        return JsonResponse({'res': 0})
 
     # 计算用户购物车商品的数量
     conn = get_redis_connection('default')
@@ -1702,7 +1778,7 @@ def cart_count(request):
 ```
 然后在前端页面调用这个接口，并渲染出来。
 在base.html中添加：
-```
+```html
 # base.html
     {# 获取用户购物车中商品的数目 #}
     {% block cart_count %}
@@ -1715,7 +1791,7 @@ def cart_count(request):
     {% endblock cart_count %}
 ```
 而在登陆和注册页面，不需要显示这个，所以我们override掉这个块。
-```
+```html
 {% block cart_count %}{% endblock cart_count %}
 ```
 然后配置urls.py
@@ -1727,23 +1803,18 @@ def cart_count(request):
 ```
     url(r'^cart/', include('cart.urls', namespace='cart')), # 购物车模块
 ```
-然后在前端编写添加到购物车的jquery代码。
-```
+然后在前端详情页`detail.html`编写添加到购物车的jquery代码。
+```html
+
 <script type="text/javascript">
-    var $add_x = $('#add_cart').offset().top;
-    var $add_y = $('#add_cart').offset().left;
-
-    var $to_x = $('#show_count').offset().top;
-    var $to_y = $('#show_count').offset().left;
-
     $('#add_cart').click(function(){
         // 获取商品的id和商品数量
-        books_id = $(this).attr('books_id')
-        books_count = $('.num_show').val()
-        csrf = $('input[name="csrfmiddlewaretoken"]').val()
+        var books_id = $(this).attr('books_id');
+        var books_count = $('.num_show').val();
+        var csrf = $('input[name="csrfmiddlewaretoken"]').val();
         // 发起请求，访问/cart/add/, 进行购物车数据的添加
-        params = {
-            'books_id': books_id, 
+        var params = {
+            'books_id': books_id,
             'books_count': books_count,
             'csrfmiddlewaretoken': csrf
         }
@@ -1751,20 +1822,10 @@ def cart_count(request):
         $.post('/cart/add/', params, function (data) {
             if (data.res == 5){
                 // 添加成功
-                $(".add_jump").css({'left':$add_y+80,'top':$add_x+10,'display':'block'})
-                $(".add_jump").stop().animate({
-                    'left': $to_y+7,
-                    'top': $to_x+7},
-                    "fast", function() {
-                        $(".add_jump").fadeOut('fast',function(){
-                            // 获取原有show_count的值
-                            count = $('#show_count').html()
-                            count = parseInt(count) + parseInt(books_count)
-                            $('#show_count').html(count);
-                        });
-                });
-            }
-            else {
+                var count = $('#show_count').html();
+                var count = parseInt(count) + parseInt(books_count);
+                $('#show_count').html(count);
+            } else {
                 // 添加失败
                 alert(data.errmsg)
             }
@@ -1781,7 +1842,8 @@ def cart_count(request):
 ```
 现在我们可以将商品添加到购物车中去了。
 然后我们再编写一段jquery代码，实现+/-商品数量的功能。并且可以自动更新总价格。
-```
+```html
+// detail.html
 {% block topfiles %}
 <script>
 $(function () {
@@ -1848,7 +1910,9 @@ $(function () {
 ## 3，购物车页面的开发
 接下来我们来实现展示购物车页面的功能。
 编写views.py。
-```
+```py
+# cart/views.py
+
 @login_required
 def cart_show(request):
     '''显示用户购物车页面'''
@@ -1897,7 +1961,7 @@ def cart_show(request):
 {% url 'cart:show' %}
 ```
 接下来，我们把订单列表渲染出来。
-```
+```html
     {% for book in books_li %}
     <ul class="cart_list_td clearfix">
         {# 提交表单时，如果checkbox没有被选中，它的值不会被提交 #}
@@ -1909,7 +1973,7 @@ def cart_show(request):
         <li class="col06">
             <div class="num_add">
                 <a href="javascript:;" class="add fl">+</a>
-                <input type="text" books_id={{ book.id }} class="num_show fl" value="{{ book.count }}">
+                <input type="text" books_id="{{ book.id }}" class="num_show fl" value="{{ book.count }}">
                 <a href="javascript:;" class="minus fl">-</a>   
             </div>
         </li>
@@ -1921,16 +1985,15 @@ def cart_show(request):
 
 ## 4，购物车中删除商品的功能
 先来编写views.py函数。
-```
+```py
 # cart/views.py
 # 前端传过来的参数:商品id books_id
 # post
 # /cart/del/
+
+@login_required
 def cart_del(request):
     '''删除用户购物车中商品的信息'''
-    # 判断用户是否登录
-    if not request.session.has_key('islogin'):
-        return JsonResponse({'res': 0, 'errmsg': '请先登录'})
 
     # 接收数据
     books_id = request.POST.get('books_id')
@@ -1941,7 +2004,7 @@ def cart_del(request):
 
     books = Books.objects.get_books_by_id(books_id=books_id)
     if books is None:
-        return JsonResponse({'res': 2, 'errmsg': '商品不存存'})
+        return JsonResponse({'res': 2, 'errmsg': '商品不存在'})
 
     # 删除购物车商品信息
     conn = get_redis_connection('default')
@@ -1956,10 +2019,11 @@ def cart_del(request):
 url(r'^del/$', views.cart_del, name='delete'), # 购物车商品记录删除
 ```
 然后在购物车页面cart.html编写jquery代码来调用del接口。
-```
+```js
 {% block topfiles %}
     <script>
     $(function () {
+        update_cart_count()
         // 计算所有被选中商品的总价，总数目和商品的小计
         function update_total_price() {
             total_count = 0
@@ -2001,8 +2065,12 @@ url(r'^del/$', views.cart_del, name='delete'), # 购物车商品记录删除
 
         // 更新页面上购物车商品的总数
         function update_cart_count() {
+            #  更新列表上方商品总数
             $.get('/cart/count/', function (data) {
                 $('.total_count').children('em').text(data.res)
+            #  更新页面右上方购物车商品总数
+            $.get('/cart/count/', function (data) {
+                $('#show_count').html(data.res)
             })
         }
 
@@ -2029,6 +2097,8 @@ url(r'^del/$', views.cart_del, name='delete'), # 购物车商品记录删除
                     }
                     // 更新页面购物车商品总数
                     update_cart_count()
+                    // 更新选择框状态
+                    $('.settlements').find(":checkbox").prop('checked', false)
                 }
             })
         })
@@ -2045,11 +2115,10 @@ url(r'^del/$', views.cart_del, name='delete'), # 购物车商品记录删除
 # 前端传过来的参数:商品id books_id 更新数目 books_count
 # post
 # /cart/update/
+
+@login_required
 def cart_update(request):
     '''更新购物车商品数目'''
-    # 判断用户是否登录
-    if not request.session.has_key('islogin'):
-        return JsonResponse({'res': 0, 'errmsg':'请先登录'})
 
     # 接收数据
     books_id = request.POST.get('books_id')
@@ -2273,12 +2342,6 @@ from django.db import models
 from db.base_model import BaseModel
 # Create your models here.
 
-
-class OrderInfoManager(models.Manager):
-    '''订单信息模型管理器类'''
-    pass
-
-
 class OrderInfo(BaseModel):
     '''订单信息模型类'''
 
@@ -2314,27 +2377,18 @@ class OrderInfo(BaseModel):
     status = models.SmallIntegerField(choices=ORDER_STATUS_CHOICES, default=1, verbose_name='订单状态')
     trade_id = models.CharField(max_length=100, unique=True, null=True, blank=True, verbose_name='支付编号')
 
-    objects = OrderInfoManager()
-
     class Meta:
         db_table = 's_order_info'
 ```
 由于每一笔订单都是由不同的商品组成，所以我们需要把一笔订单拆分开，来建立一个订单中每种商品的信息数据表。关系数据库的一个好处就是强约束，冗余也很少，这点比mongodb好。
 ```py
-class OrderGoodsManager(models.Manager):
-    '''订单商品模型管理器类'''
-    pass
-
-
-class OrderGoods(BaseModel):
+class OrderBooks(BaseModel):
     '''订单商品模型类'''
     order = models.ForeignKey('OrderInfo', verbose_name='所属订单')
     books = models.ForeignKey('books.Books', verbose_name='订单商品')
     count = models.IntegerField(default=1, verbose_name='商品数量')
     price = models.DecimalField(max_digits=10, decimal_places=2, verbose_name='商品价格')
     # comment = models.CharField(max_length=128, null=True, blank=True, verbose_name='商品评论')
-
-    objects = OrderGoodsManager()
 
     class Meta:
         db_table = 's_order_books'
@@ -2355,7 +2409,7 @@ from utils.decorators import login_required
 from django.http import HttpResponse,JsonResponse
 from users.models import Address
 from books.models import Books
-from order.models import OrderInfo, OrderGoods
+from order.models import OrderInfo, OrderBooks
 from django_redis import get_redis_connection
 from datetime import datetime
 from django.conf import settings
@@ -2523,22 +2577,6 @@ urlpatterns = [
         <div class="mask"></div>
     </div>
 {% endblock bottom %}
-{% block bottomfiles %}
-    <script type="text/javascript">
-        $('#order_btn').click(function() {
-            localStorage.setItem('order_finish',2);
-
-            $('.popup_con').fadeIn('fast', function() {
-
-                setTimeout(function(){
-                    $('.popup_con').fadeOut('fast',function(){
-                        window.location.href = 'index.html';
-                    });
-                },3000)
-            });
-        });
-    </script>
-{% endblock bottomfiles %}
 ```
 
 然后将模板中的对应元素修改为后端渲染的代码。
@@ -2586,7 +2624,7 @@ urlpatterns = [
             <li class="col05">小计</li>
         </ul>
         {% for book in books_li %}
-        <ul class="books_list_td clearfix">
+        <ul class="book_list_td clearfix">
             <li class="col01">{{ forloop.counter }}</li>
             <li class="col02"><img src="{% static book.image %}"></li>
             <li class="col03">{{ book.name }}</li>
@@ -2620,22 +2658,6 @@ urlpatterns = [
         <div class="mask"></div>
     </div>
 {% endblock bottom %}
-{% block bottomfiles %}
-    <script type="text/javascript">
-        $('#order_btn').click(function() {
-            localStorage.setItem('order_finish',2);
-
-            $('.popup_con').fadeIn('fast', function() {
-
-                setTimeout(function(){
-                    $('.popup_con').fadeOut('fast',function(){
-                        window.location.href = 'index.html';
-                    });
-                },3000)
-            });
-        });
-    </script>
-{% endblock bottomfiles %}
 ```
 那么订单显示页面就初步开发完了。
 
@@ -2733,7 +2755,7 @@ def order_commit(request):
                 return JsonResponse({'res': 5, 'errmsg': '商品库存不足'})
 
             # 创建一条订单商品记录
-            OrderGoods.objects.create(order_id=order_id,
+            OrderBooks.objects.create(order_id=order_id,
                                       books_id=id,
                                       count=count,
                                       price=books.price)
@@ -2768,19 +2790,19 @@ def order_commit(request):
 ```py
     url(r'^commit/$', views.order_commit, name='commit'), # 生成订单
 ```
-然后改写前端页面，来调用后端提交订单的接口。
+然后改写前端页面`place_order.html`，来调用后端提交订单的接口。
 ```js
 {% block bottomfiles %}
     <script type="text/javascript">
         $('#order_btn').click(function() {
             // 获取收货地址的id, 支付方式，用户购买的商品id
-            addr_id = $('input[name="addr_id"]').val()
-            pay_method = $('input[name="pay_style"]:checked').val()
-            books_ids = $(this).attr('books_ids')
-            csrf = $('input[name="csrfmiddlewaretoken"]').val()
+            var addr_id = $('input[name="addr_id"]').val()
+            var pay_method = $('input[name="pay_style"]:checked').val()
+            var books_ids = $(this).attr('books_ids')
+            var csrf = $('input[name="csrfmiddlewaretoken"]').val()
             // alert(addr_id+':'+pay_method+':'+books_ids)
             // 发起post请求， 访问/order/commit/
-            params = {
+            var params = {
                 'addr_id': addr_id,
                 'pay_method': pay_method,
                 'books_ids': books_ids,
@@ -2789,7 +2811,6 @@ def order_commit(request):
             $.post('/order/commit/', params, function (data) {
                 // 根据json进行处理
                 if (data.res == 6){
-                    localStorage.setItem('order_finish',2);
                     $('.popup_con').fadeIn('fast', function() {
                         setTimeout(function(){
                             $('.popup_con').fadeOut('fast',function(){
@@ -2862,6 +2883,7 @@ def order_commit(request):
 ```
 查缺补漏，发现编辑收货地址功能还没有实现。我们先来编写用户中心地址页的接口。注意，要写在`users/views.py`中。
 ```python
+
 @login_required
 def address(request):
     '''用户中心-地址页'''
@@ -2883,7 +2905,7 @@ def address(request):
 
         # 2.进行校验
         if not all([recipient_name, recipient_addr, zip_code, recipient_phone]):
-            return render(request, 'users/user_center_site.html', {'errmsg': '参数不能为空!'})
+            return render(request, 'users/user_center_site.html', {'errmsg': '参数不能为空!'})
 
         # 3.添加收货地址
         Address.objects.add_one_address(passport_id=passport_id,
@@ -2942,9 +2964,10 @@ def address(request):
 接下来我们进一步完善一下用户中心，把用户中心的订单显示页面给做了。先来实现订单显示的后台接口。
 ```python
 # users/views.py
+from django.core.paginator import Paginator
 
 @login_required
-def order(request):
+def order(request, page):
     '''用户中心-订单页'''
     # 查询用户的订单信息
     passport_id = request.session.get('passport_id')
@@ -2957,10 +2980,10 @@ def order(request):
     for order in order_li:
         # 根据订单id查询订单商品信息
         order_id = order.order_id
-        order_books_li = OrderGoods.objects.filter(order_id=order_id)
+        order_books_li = OrderBooks.objects.filter(order_id=order_id)
 
         # 计算商品的小计
-        # order_books ->OrderGoods实例对象
+        # order_books ->OrderBooks实例对象
         for order_books in order_books_li:
             count = order_books.count
             price = order_books.price
@@ -2970,17 +2993,39 @@ def order(request):
 
         # 给order对象动态增加一个属性order_books_li,保存订单中商品的信息
         order.order_books_li = order_books_li
+    
+    paginator = Paginator(order_li, 3)      # 每页显示3个订单
+    
+    num_pages = paginator.num_pages
+    
+    if not page:        # 首次进入时默认进入第一页
+        page = 1
+    if page == '' or int(page) > num_pages:
+        page = 1
+    else:
+        page = int(page)
+        
+    order_li = paginator.page(page)
+    
+    if num_pages < 5:
+        pages = range(1, num_pages + 1)
+    elif page <= 3:
+        pages = range(1, 6)
+    elif num_pages - page <= 2:
+        pages = range(num_pages - 4, num_pages + 1)
+    else:
+        pages = range(page - 2, page + 3)
 
-        context = {
-            'order_li': order_li,
-            'page': 'order'
-        }
+    context = {
+        'order_li': order_li,
+        'pages': pages,
+    }
 
     return render(request, 'users/user_center_order.html', context)
 ```
 然后配置urls.py。
 ```
-    url(r'^order/$', views.order, name='order'), # 用户中心-订单页
+    url(r'^order/(?P<page>\d+)?/?$', views.order, name='order'), # 用户中心-订单页  增加分页功能
 ```
 然后将user_center_order.html拷贝到templates/users文件夹下，并继承base.html。
 然后改写模板中的元素，使得后端可以渲染。
@@ -3016,7 +3061,7 @@ def order(request):
                     <tbody>
                         <tr>
                             <td width="55%">
-                                {# 遍历出来的order_books是一个OrderGoods对象 #}
+                                {# 遍历出来的order_books是一个OrderBooks对象 #}
                                 {% for order_books in order.order_books_li %}
                                 <ul class="order_book_list clearfix">                   
                                     <li class="col01"><img src="{% static order_books.books.image %}"></li>
@@ -3035,13 +3080,19 @@ def order(request):
                 {% endfor %}
 
                 <div class="pagenation">
-                    <a href="#"><上一页</a>
-                    <a href="#" class="active">1</a>
-                    <a href="#">2</a>
-                    <a href="#">3</a>
-                    <a href="#">4</a>
-                    <a href="#">5</a>
-                    <a href="#">下一页></a>
+                    {% if order_li.has_previous %}
+                        <a href="{% url 'user:order' page=order_li.previous_page_number %}">上一页</a>
+                    {% endif %}
+                    {% for page in pages %}
+                        {% if page == order_li.number %}
+                            <a href="{% url 'user:order' page=page %}" class="active">{{ page }}</a>
+                        {% else %}
+                            <a href="{% url 'user:order' page=page %}">{{ page }}</a>
+                        {% endif %}
+                    {% endfor %}
+                    {% if order_li.has_next %}
+                        <a href="{% url 'user:order' page=order_li.next_page_number %}">下一页</a>
+                    {% endif %}
                 </div>
         </div>
     </div>
@@ -3049,18 +3100,55 @@ def order(request):
 ```
 这样我们个人中心的订单的显示页面也就做完了。
 
+
 ## 7，“去付款”功能的实现
 接下来我们需要实现“去付款”功能。这里需要集成阿里的支付宝sdk。
 我们先来编写后端代码。
+
+生成秘钥文件
+```
+openssl
+OpenSSL> genrsa -out app_private_key.pem 2048  # 私钥
+OpenSSL> rsa -in app_private_key.pem -pubout -out app_public_key.pem # 导出公钥
+OpenSSL> exit
+```
+设置支付宝沙箱公钥
+支付宝逐渐转换为RSA2秘钥，可以使用官方工具生成秘钥
+```
+支付宝沙箱地址：https://openhome.alipay.com/platform/appDaily.htm?tab=info
+生成RSA2教程：https://docs.open.alipay.com/291/106130
+测试用秘钥： 链接: https://pan.baidu.com/s/1HpAoD8heei18rXdjRIZdUg 密码: rcip
+```
+设置本地公钥&私钥格式
+```
+app_private_key_string.pem
+
+-----BEGIN RSA PRIVATE KEY-----
+         私钥内容
+-----END RSA PRIVATE KEY-----
+
+
+alipay_public_key_string.pem
+
+-----BEGIN PUBLIC KEY-----
+         公钥内容
+-----END PUBLIC KEY-----
+```
+
+
 ```python
 # order/views.py
 # 前端需要发过来的参数:order_id
 # post
+# 接口文档：https://github.com/fzlee/alipay/blob/master/README.zh-hans.md
+# 安装python-alipay-sdk
+# pip install python-alipay-sdk --upgrade
+
+from alipay import AliPay
+
+@login_required
 def order_pay(request):
     '''订单支付'''
-    # 用户登录判断
-    if not request.session.has_key('islogin'):
-        return JsonResponse({'res': 0, 'errmsg': '用户未登录'})
 
     # 接收订单id
     order_id = request.POST.get('order_id')
@@ -3076,12 +3164,20 @@ def order_pay(request):
     except OrderInfo.DoesNotExist:
         return JsonResponse({'res': 2, 'errmsg': '订单信息出错'})
 
+
+    # 将app_private_key.pem和app_public_key.pem拷贝到order文件夹下。
+    app_private_key_path = os.path.join(settings.BASE_DIR, 'order/app_private_key.pem')
+    alipay_public_key_path = os.path.join(settings.BASE_DIR, 'order/app_public_key.pem')
+
+    app_private_key_string = open(app_private_key_path).read()
+    alipay_public_key_string = open(alipay_public_key_path).read()
+
     # 和支付宝进行交互
     alipay = AliPay(
-        appid="2016090800464054", # 应用id
+        appid="2016091500515408", # 应用id
         app_notify_url=None,  # 默认回调url
-        app_private_key_path=os.path.join(settings.BASE_DIR, 'order/app_private_key.pem'),
-        alipay_public_key_path=os.path.join(settings.BASE_DIR, 'order/alipay_public_key.pem'),  # 支付宝的公钥，验证支付宝回传消息使用，不是你自己的公钥,
+        app_private_key_string=app_private_key_string,
+        alipay_public_key_string=alipay_public_key_string,  # 支付宝的公钥，验证支付宝回传消息使用，不是你自己的公钥,
         sign_type = "RSA2",  # RSA 或者 RSA2
         debug = True,  # 默认False
     )
@@ -3090,7 +3186,7 @@ def order_pay(request):
     total_pay = order.total_price + order.transit_price # decimal
     order_string = alipay.api_alipay_trade_page_pay(
         out_trade_no=order_id, # 订单id
-        total_amount=str(total_pay),
+        total_amount=str(total_pay), # Json传递，需要将浮点转换为字符串
         subject='尚硅谷书城%s' % order_id,
         return_url=None,
         notify_url=None  # 可选, 不填则使用默认notify url
@@ -3105,11 +3201,10 @@ def order_pay(request):
 # 前端需要发过来的参数:order_id
 # post
 from alipay import AliPay
+
+@login_required
 def check_pay(request):
     '''获取用户支付的结果'''
-    # 用户登录判断
-    if not request.session.has_key('islogin'):
-        return JsonResponse({'res': 0, 'errmsg': '用户未登录'})
 
     passport_id = request.session.get('passport_id')
     # 接收订单id
@@ -3126,15 +3221,20 @@ def check_pay(request):
     except OrderInfo.DoesNotExist:
         return JsonResponse({'res': 2, 'errmsg': '订单信息出错'})
 
+    app_private_key_path = os.path.join(settings.BASE_DIR, 'order/app_private_key.pem')
+    alipay_public_key_path = os.path.join(settings.BASE_DIR, 'order/app_public_key.pem')
+
+    app_private_key_string = open(app_private_key_path).read()
+    alipay_public_key_string = open(alipay_public_key_path).read()
+
     # 和支付宝进行交互
     alipay = AliPay(
-        appid="2016090800464054",  # 应用id
+        appid="2016091500515408", # 应用id
         app_notify_url=None,  # 默认回调url
-        app_private_key_path=os.path.join(settings.BASE_DIR, 'df_order/app_private_key.pem'),
-        alipay_public_key_path=os.path.join(settings.BASE_DIR, 'df_order/alipay_public_key.pem'),
-        # 支付宝的公钥，验证支付宝回传消息使用，不是你自己的公钥,
-        sign_type="RSA2",  # RSA 或者 RSA2
-        debug=True,  # 默认False
+        app_private_key_string=app_private_key_string,
+        alipay_public_key_string=alipay_public_key_string,  # 支付宝的公钥，验证支付宝回传消息使用，不是你自己的公钥,
+        sign_type = "RSA2",  # RSA 或者 RSA2
+        debug = True,  # 默认False
     )
 
     while True:
@@ -3168,12 +3268,12 @@ ALIPAY_URL='https://openapi.alipaydev.com/gateway.do'
     url(r'^pay/$', views.order_pay, name='pay'), # 订单支付
     url(r'^check_pay/$', views.check_pay, name='check_pay'), # 查询支付结果
 ```
-然后编写前端jquery代码，来处理支付后的结果，比如支付成功以后刷新页面。
+然后编写前端jquery代码，来处理支付后的结果，比如支付成功以后刷新页面。以下代码写入`templates/users/user_center_order.html`中。
 ```js
 {% block bottomfiles%}
     <script>
     $(function () {
-        $('.oper_btn').click(function () {
+        $('.oper_btn').click(function () {
             // 获取订单id和订单的状态
             order_id = $(this).attr('order_id')
             order_status = $(this).attr('order_status')
@@ -3283,6 +3383,7 @@ from users.models import Passport
 from django.views.decorators.csrf import csrf_exempt
 import json
 import redis
+from utils.decorators import login_required
 # Create your views here.
 # 设置过期时间
 EXPIRE_TIME = 60 * 10
@@ -3292,6 +3393,7 @@ redis_db = redis.Redis(connection_pool=pool)
 
 @csrf_exempt
 @require_http_methods(['GET', 'POST'])
+@login_required
 def comment(request, books_id):
     book_id = books_id
     if request.method == 'GET':
@@ -3373,16 +3475,39 @@ urlpatterns = [
                 <a href="#" id="write-comment" class="comment">我要写评论</a>
             </div>
             <div style="display:flex;" id="comment-input" data-bookid="{{ books.id }}" data-userid="{{ request.session.passport_id }}">
-              <div>
-                <input type="text" placeholder="评论内容">
-              </div>
-              <div id="submit-comment">
-                <button>
-                  提交评论
-                </button>
-              </div>
+                <div>
+                    <input type="text" placeholder="评论内容">
+                </div>
+                <div id="submit-comment">
+                    <button>
+                      提交评论
+                    </button>
+                </div>
             </div>
 ```
+
+再增加id-book_detail 和id-book_comment 增加点击效果 
+```html
+    <div class="r_wrap fr clearfix">
+        <ul class="detail_tab clearfix">
+            <li class="active" id="detail">商品介绍</li>
+            <li id="comment">评论</li>
+        </ul>
+
+        <div class="tab_content" >
+            <dl id="book_detail">
+                <dt>商品详情：</dt>
+                <dd>{{ books.detail | safe }}</dd>
+            </dl>
+            <dl id="book_comment" style="display: none; font-size: 15px; color: #0a0a0a">
+                <dt>用户评论:</dt>
+                <dd></dd>
+            </dl>
+        </div>
+    </div>
+```
+
+
 然后写样式。
 ```css
 <style type="text/css">
@@ -3478,7 +3603,7 @@ EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.126.com'
 # 126和163邮箱的SMTP端口为25； QQ邮箱使用的SMTP端口为465
 EMAIL_PORT = 25
-# 如果使用QQ邮箱发送邮件，需要开启SSL加密
+# 如果使用QQ邮箱发送邮件，需要开启SSL加密, 如果在aliyun上部署，也需要开启ssl加密，同时修改端口为EMAIL_PORT = 465
 # EMAIL_USE_SSL = True
 # 发送邮件的邮箱
 EMAIL_HOST_USER = 'xxxxxxxx@126.com'
@@ -3614,12 +3739,26 @@ __all__ = ['celery_app']
 ```
 $ celery -A bookstore worker -l info
 ```
+在win10上运行celery4.x会出现bug
+解决方案:
+1. 安装eventlet
+```
+pip install eventlet
+```
+2. 启动celery的时候添加参数
+```
+celery -A bookstore worker -l info -P eventlet
+```
 
 # <a id="10">10，登陆验证码功能实现</a>
+
+将项目中的`Ubuntu-RI.ttf`字体文件拷贝到你的项目的根目录下面。
 
 ```python
 # users/views.py
 from django.http import HttpResponse
+from django.conf import settings
+import os
 def verifycode(request):
     #引入绘图模块
     from PIL import Image, ImageDraw, ImageFont
@@ -3646,7 +3785,7 @@ def verifycode(request):
     for i in range(0, 4):
         rand_str += str1[random.randrange(0, len(str1))]
     #构造字体对象
-    font = ImageFont.truetype("/Library/Fonts/Arial.ttf", 15)
+    font = ImageFont.truetype(os.path.join(settings.BASE_DIR, "Ubuntu-RI.ttf"), 15)
     #构造字体颜色
     fontcolor = (255, random.randrange(0, 255), random.randrange(0, 255))
     #绘制4个字
@@ -3671,28 +3810,28 @@ def verifycode(request):
     url(r'^verifycode/$', views.verifycode, name='verifycode'), # 验证码功能
 ```
 编写前端代码。在前段代码中的Form里添加以下代码。
-```
-# templates/users/login.html
+```html
+// templates/users/login.html
 <div style="top: 100px; position: absolute;">
     <input type="text" id="vc" name="vc">
-    <img id='verifycode' src="/user/verifycode/" alt="CheckCode"/>
+    <img id='verifycode' src="/user/verifycode/" onclick="this.src='/user/verifycode/?'+Math.random()" alt="CheckCode"/>
 </div>
 ```
 前端需要向后端post数据。post以下数据
 ```javascript
-            username = $('#username').val()
-            password = $('#pwd').val()
-            csrf = $('input[name="csrfmiddlewaretoken"]').val()
-            remember = $('input[name="remember"]').prop('checked')
-            vc = $('input[name="vc"]').val()
-            // 发起ajax请求
-            params = {
-                'username': username,
-                'password': password,
-                'csrfmiddlewaretoken': csrf,
-                'remember': remember,
-                'verifycode': vc,
-            }
+var username = $('#username').val()
+var password = $('#pwd').val()
+var csrf = $('input[name="csrfmiddlewaretoken"]').val()
+var remember = $('input[name="remember"]').prop('checked')
+var vc = $('input[name="vc"]').val()
+// 发起ajax请求
+var params = {
+    'username': username,
+    'password': password,
+    'csrfmiddlewaretoken': csrf,
+    'remember': remember,
+    'verifycode': vc,
+}
 ```
 然后在后端进行校验。login_check函数改为以下代码实现。
 ```python
@@ -3746,20 +3885,20 @@ def login_check(request):
 
 # <a id="11">11，全文检索的实现</a>
 添加全文检索应用，在配置文件中。
-```
+```py
 INSTALLED_APPS = (
     ...
     'haystack',
 )
 ```
 在配置文件中写入以下配置。
-```
+```py
 # 全文检索配置
 HAYSTACK_CONNECTIONS = {
     'default': {
         # 使用whoosh引擎
-        # 'ENGINE': 'haystack.backends.whoosh_cn_backend.WhooshEngine',
-        'ENGINE': 'haystack.backends.whoosh_backend.WhooshEngine',
+        'ENGINE': 'haystack.backends.whoosh_cn_backend.WhooshEngine',
+        # 'ENGINE': 'haystack.backends.whoosh_backend.WhooshEngine',
         # 索引文件路径
         'PATH': os.path.join(BASE_DIR, 'whoosh_index'),
     }
@@ -3778,7 +3917,7 @@ urlpatterns = [
 ]
 ```
 在books应用目录下建立search_indexes.py文件。
-```
+```py
 from haystack import indexes
 from books.models import Books
 
@@ -3802,7 +3941,7 @@ class BooksIndex(indexes.SearchIndex, indexes.Indexable):
 {{ object.detail }} # 根据书籍的详情建立索引
 ```
 在目录“templates/search/”下建立search.html。
-```
+```html
 {% extends 'base.html' %}
 {% load staticfiles %}
 {% block title %}尚硅谷书城-书籍搜索结果列表{% endblock title %}
@@ -3847,7 +3986,7 @@ class BooksIndex(indexes.SearchIndex, indexes.Indexable):
 ```
 建立ChineseAnalyzer.py文件。
 保存在haystack的安装文件夹下，路径如“/home/python/.virtualenvs/django_py2/lib/python3.5/site-packages/haystack/backends”
-```
+```py
 import jieba
 from whoosh.analysis import Tokenizer, Token
 
@@ -3875,18 +4014,23 @@ def ChineseAnalyzer():
 ```
 复制whoosh_backend.py文件，改名为whoosh_cn_backend.py
 注意：复制出来的文件名，末尾会有一个空格，记得要删除这个空格
+然后将下面这一行代码写入`whoosh_cn_backend.py`文件中。
+```py
+from .ChineseAnalyzer import ChineseAnalyzer
 ```
-from .ChineseAnalyzer import ChineseAnalyzer 
-查找
+然后查找下面的这一行代码
+```py
 analyzer=StemmingAnalyzer()
+```
 改为
+```py
 analyzer=ChineseAnalyzer()
 ```
 生成索引
-```
+```py
 $ python manage.py rebuild_index
 ```
-在模板中创建搜索栏
+在模板`base.html`中创建搜索栏
 ```
 <form method='get' action="/search/" target="_blank">
     <input type="text" name="q">
@@ -3896,7 +4040,7 @@ $ python manage.py rebuild_index
 
 # <a id="12">12，用户激活功能的实现</a>
 首先编写视图函数：
-```
+```py
 def register_active(request, token):
     '''用户账户激活'''
     serializer = Serializer(settings.SECRET_KEY, 3600)
@@ -3920,7 +4064,7 @@ def register_active(request, token):
 
 # <a id="13">13，用户中心最近浏览功能的实现</a>
 最近浏览使用redis实现。重新编写books/views.py中的detail函数，每次点击商品，都将商品信息写入redis，作为最近浏览的数据。
-```
+```py
 # books/views.py
 def detail(request, books_id):
     '''显示商品的详情页面'''
@@ -3954,7 +4098,7 @@ def detail(request, books_id):
     return render(request, 'books/detail.html', context)
 ```
 然后重写用户中心的视图函数代码：users/views.py中的user函数。
-```
+```py
 @login_required
 def user(request):
     '''用户中心-信息页'''
@@ -3981,7 +4125,7 @@ def user(request):
                                                            'books_li': books_li})
 ```
 然后编写前端页面。重写user_center_info.html中最近浏览下面的html内容。
-```
+```html
 <h3 class="common_title2">最近浏览</h3>
 <div class="has_view_list">
     <ul class="book_type_list clearfix">
@@ -4039,217 +4183,13 @@ INSTALLED_APPS = (
 {% load filters %}
 ```
 
-# <a id="15">15，部署</a>
-## 1，安装uWSGI。
+# <a id="15">15，使用gunicorn+nginx+django进行部署</a>
+安装nginx。
 ```
-$ pip install uwsgi
+sudo apt install nginx
 ```
-配置uWSGI，在项目中新建文件uwsgi.ini，编写如下配置：
+先看nginx配置文件nginx.conf, 一般情况下, 路径为`/etc/nginx/nginx.conf`
 ```
-[uwsgi]
-socket=外网ip:端口（使用nginx连接时，使用socket）
-http=外网ip:端口（直接做web服务器，使用http）
-chdir=项目根目录
-wsgi-file=项目中wsgi.py文件的目录，相对于项目根目录
-processes=4
-threads=2
-master=True
-pidfile=uwsgi.pid
-daemonize=uswgi.log
-```
-示例，我的配置文件。
-```
-[uwsgi]
-socket=127.0.0.1:9001
-module=uwsgi
-chdir=/home/atguigu/桌面/bookstoredata/bookstore/bookstore
-wsgi-file=bookstore/wsgi.py
-processes=4
-threads=2
-master=True
-pidfile=uwsgi.pid
-daemonize=uwsgi.log
-virtualenv=/home/atguigu/py3
-```
-- 启动：uwsgi --ini uwsgi.ini
-- 停止：uwsgi --stop uwsgi.pid
-- 重启：uwsgi --reload uwsgi.pid
-- 使用http协议查看网站运行情况，运行正常，但是静态文件无法加载
-
-# 2，安装nginx
-```
-$ sudo apt-get nginx
-```
-解压缩：(大家看自己的nginx版本，这个是例子)
-```
-$ tar zxvf nginx-1.6.3.tar.gz
-```
-进入nginx-1.6.3目录依次执行如下命令进行安装：
-```
-$ ./configure
-$ make
-$ sudo make install
-```
-- 默认安装到/usr/local/nginx目录，进入此目录执行命令
-- 查看版本：sudo sbin/nginx -v
-- 启动：sudo sbin/nginx
-- 停止：sudo sbin/nginx -s stop
-- 重启：sudo sbin/nginx -s reload
-- 通过浏览器查看nginx运行结果
-- 指向uwsgi项目：编辑conf/nginx.conf文件
-```
-sudo conf/nginx.conf
-
-# 在server下添加新的location项，指向uwsgi的ip与端口
-location / {
-    include uwsgi_params;将所有的参数转到uwsgi下
-    uwsgi_pass uwsgi的ip与端口;
-}
-```
-- 修改uwsgi.ini文件，启动socket，禁用http
-- 重启nginx、uwsgi
-- 在浏览器中查看项目，发现静态文件加载不正常，接下来解决静态文件的问题
-- 静态文件一直都找不到，现在终于可以解决了
-- 所有的静态文件都会由nginx处理，不会将请求转到uwsgi
-- 配置nginx的静态项，打开conf/nginx.conf文件，找到server，添加新location
-
-```
-location /static {
-    alias /var/www/test5/static/;
-}
-```
-- 在服务器上创建目录结构“/var/www/test5/”
-- 修改目录权限
-```
-$ sudo chmod 777 /var/www/test5
-```
-创建static目录，注意顺序是先分配权限，再创建目录
-```
-$ mkdir static
-```
-修改settings.py文件
-```
-STATIC_ROOT='/var/www/test5/static/'
-STATIC_URL='/static/'
-```
-- 收集所有静态文件到static_root指定目录：python manage.py collectstatic
-- 重启nginx、uwsgi
-示例：
-```
-# nginx.conf
-user www-data;
-worker_processes auto;
-pid /run/nginx.pid;
-
-events {
-    worker_connections 768;
-    # multi_accept on;
-}
-
-http {
-
-    ##
-    # Basic Settings
-    ##
-
-    sendfile on;
-    tcp_nopush on;
-    tcp_nodelay on;
-    keepalive_timeout 65;
-    types_hash_max_size 2048;
-    # server_tokens off;
-
-    # server_names_hash_bucket_size 64;
-    # server_name_in_redirect off;
-
-    include /etc/nginx/mime.types;
-    default_type application/octet-stream;
-
-    ##
-    # SSL Settings
-    ##
-
-    ssl_protocols TLSv1 TLSv1.1 TLSv1.2; # Dropping SSLv3, ref: POODLE
-    ssl_prefer_server_ciphers on;
-
-    ##
-    # Logging Settings
-    ##
-
-    access_log /var/log/nginx/access.log;
-    error_log /var/log/nginx/error.log;
-
-    ##
-    # Gzip Settings
-    ##
-
-    gzip on;
-    gzip_disable "msie6";
-
-    # gzip_vary on;
-    # gzip_proxied any;
-    # gzip_comp_level 6;
-    # gzip_buffers 16 8k;
-    # gzip_http_version 1.1;
-    # gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
-
-    ##
-    # Virtual Host Configs
-    ##
-
-    include /etc/nginx/conf.d/*.conf;
-    include /etc/nginx/sites-enabled/*;
-        
-        server {
-            listen 8080;
-            server_name localhost;
-            location / {
-                include uwsgi_params;
-                uwsgi_pass 127.0.0.1:9001;
-                uwsgi_read_timeout 2;
-            }
-            error_page 500 502 503 504 /50x.html;
-            location = /50x.html {
-                root html;
-            }
-            location /media {
-                alias /home/atguigu/桌面/bookstoredata/bookstore/bookstore/static;
-            }
-            location /static {
-                alias /home/atguigu/桌面/bookstoredata/bookstore/bookstore/static;
-            }
-        }
-
-}
-
-
-#mail {
-#   # See sample authentication script at:
-#   # http://wiki.nginx.org/ImapAuthenticateWithApachePhpScript
-# 
-#   # auth_http localhost/auth.php;
-#   # pop3_capabilities "TOP" "USER";
-#   # imap_capabilities "IMAP4rev1" "UIDPLUS";
-# 
-#   server {
-#       listen     localhost:110;
-#       protocol   pop3;
-#       proxy      on;
-#   }
-# 
-#   server {
-#       listen     localhost:143;
-#       protocol   imap;
-#       proxy      on;
-#   }
-#}
-```
-重启uwsgi，nginx。就部署好了。
-
-# <a id="16">16，使用gunicorn+nginx+django进行部署</a>
-先看nginx配置文件nginx.conf
-```
-er www-data;
 user root;
 worker_processes auto;
 pid /run/nginx.pid;
@@ -4309,7 +4249,7 @@ http {
         # Virtual Host Configs
         ##
 
-        include /etc/nginx/conf.d/*.conf;
+        #include /etc/nginx/conf.d/*.conf;
         #include /etc/nginx/sites-enabled/*;
 
         server {
@@ -4335,10 +4275,22 @@ http {
         }
 }
 ```
-然后在根目录bookstore新建文件夹collect_static。
-然后在根目录运行python manage.py collectstatic命令。
-并将books/models.py中添加代码：
+如果`nginx`没启动，则执行
+```s
+$ nginx
 ```
+如果`nginx`已经启动，则执行以下命令重启
+```s
+$ nginx -s reload
+```
+然后在根目录bookstore新建文件夹collect_static。
+注意要在配置文件`settings.py`中写一行
+```py
+STATIC_ROOT = os.path.join(BASE_DIR, 'collect_static')
+```
+然后在根目录运行`python manage.py collectstatic`命令，这个命令用来收集静态文件。
+并将books/models.py中添加代码：
+```py
 from django.core.files.storage import FileSystemStorage
 fs = FileSystemStorage(location='/root/bookstore/bookstore/collect_static')
 class Books(BaseModel):
@@ -4346,7 +4298,119 @@ class Books(BaseModel):
     image = models.ImageField(storage=fs, upload_to='books', verbose_name='商品图片')
     ...
 ```
-然后在根目录运行gunicorn。
+然后在根目录运行`gunicorn`。安装`gunicorn`，`pip install gunicorn`
 ```
 nohup gunicorn -w 3 -b 0.0.0.0:8000 bookstore.wsgi:application &
 ```
+
+# <a id="16">16，django日志模块的使用</a>
+
+首先将下面的代码添加到配置文件`settings.py`。
+
+```py
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {             # 日志输出的格式
+        'verbose': {
+            'format': '%(levelname)s %(asctime)s %(module)s %(process)d %(thread)d %(message)s'
+        },
+        'simple': {
+            'format': '%(levelname)s %(message)s'
+        },
+    },
+    'handlers': {               # 处理日志的函数
+        'file': {
+            'level': 'DEBUG',
+            'class': 'logging.FileHandler',
+            'filename': BASE_DIR + '/log/debug.log',
+            'formatter': 'simple',
+        },
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['file'],
+            'propagate': True,
+        },
+        'django.request': {     # 日志的命名空间
+            'handlers': ['file'],
+            'level': 'DEBUG',
+            'propagate': True,
+        },
+    },
+}
+```
+
+然后在根目录新建文件夹`log`。
+```
+mkdir log
+```
+
+然后在代码中添加日志相关的代码。例如，在`books/views.py`中，添加以下代码：
+
+```py
+import logging
+logger = logging.getLogger('django.request')
+```
+在`books/views.py`中的`index`函数中添加一行：
+```py
+logger.info(request.body)
+```
+
+就会发现当我们访问首页的时候，在`log/debug.log`中有日志信息。
+
+
+# <a id="17">17，中间件的编写</a>
+
+在`utils`文件夹中新建`middleware.py`文件。
+
+```py
+from django import http
+from django.utils.deprecation import MiddlewareMixin
+# 中间件示例，打印中间件执行语句
+class BookMiddleware(MiddlewareMixin):
+    def process_request(self, request):
+        print("Middleware executed")
+
+# 分别处理收到的请求和发出去的相应，要理解中间件的原理。
+class AnotherMiddleware(MiddlewareMixin):
+    def process_request(self, request):
+        print("Another middleware executed")
+
+    def process_response(self, request, response):
+        print("AnotherMiddleware process_response executed")
+        return response
+
+# 记录用户访问的url地址
+class UrlPathRecordMiddleware(MiddlewareMixin):
+    '''记录用户访问的url地址'''
+    EXCLUDE_URLS = ['/user/login/', '/user/logout/', '/user/register/']
+    # 1./user/ 记录 url_path = /user/
+    # 2./user/login/ url_path = /user/
+    # 3./user/login_check/  url_path = /user/
+    def process_view(self, request, view_func, *view_args, **view_kwargs):
+        # 当用户请求的地址不在排除的列表中，同时不是ajax的get请求
+        if request.path not in UrlPathRecordMiddleware.EXCLUDE_URLS and not request.is_ajax() and request.method == 'GET':
+            request.session['url_path'] = request.path
+
+BLOCKED_IPS = []
+# 拦截在BLOCKED_IPS中的IP
+class BlockedIpMiddleware(MiddlewareMixin):
+    def process_request(self, request):
+        if request.META['REMOTE_ADDR'] in BLOCKED_IPS:
+            return http.HttpResponseForbidden('<h1>Forbidden</h1>')
+```
+
+然后在配置文件`settings.py`中，写入中间件类的名字。
+
+```py
+MIDDLEWARE_CLASSES = (
+    ...
+    'utils.middleware.BookMiddleware',
+    'utils.middleware.AnotherMiddleware',
+    'utils.middleware.UrlPathRecordMiddleware',
+    'utils.middleware.BlockedIpMiddleware',
+)
+```
+
+这样就可以使用中间件了。
